@@ -1,0 +1,111 @@
+(function () {
+  const delay = (ms) => new Promise((r) => setTimeout(r, ms));
+  let stopped = false;
+
+  // إيقاف طوارئ: اكتب stopDeleting() في الكونسول في أي وقت
+  window.stopDeleting = () => {
+    stopped = true;
+    console.log('⛔ هيوقف بعد المحاولة الحالية');
+  };
+
+  async function waitFor(selector, timeout = 6000) {
+    const start = Date.now();
+    while (Date.now() - start < timeout) {
+      const el = document.querySelector(selector);
+      if (el && el.offsetParent !== null) return el; // لازم يكون ظاهر مش مخفي
+      await delay(150);
+    }
+    return null;
+  }
+
+  // بتنفذ خطوة، ولو فشلت بتعيد المحاولة عدد مرات محدد قبل ما تستسلم
+  async function withRetry(fn, retries = 3, label = '') {
+    for (let attempt = 1; attempt <= retries; attempt++) {
+      try {
+        const result = await fn();
+        if (result) return result;
+      } catch (e) {
+        console.log(`⚠️ خطأ في "${label}" (محاولة ${attempt}/${retries}):`, e.message);
+      }
+      if (attempt < retries) {
+        await delay(1000 * attempt); // backoff بسيط
+      }
+    }
+    return null;
+  }
+
+  async function deleteOneVideo() {
+    const trigger = await withRetry(
+      () => waitFor('[data-e2e="cinema-more-menu-trigger"]', 4000),
+      2,
+      'زرار المزيد'
+    );
+    if (!trigger) return 'no_video'; // مفيش فيديو مفتوح = خلصنا فعلاً
+
+    trigger.click();
+
+    const deleteItem = await withRetry(
+      () => waitFor('[data-e2e="more-menu-popover_delete-content"]', 3000),
+      2,
+      'خيار الحذف'
+    );
+    if (!deleteItem) {
+      // ممكن يكون المنيو اتقفلت لوحدها، جرب تفتحه تاني مرة واحدة
+      trigger.click();
+      await delay(400);
+      const retryItem = await waitFor('[data-e2e="more-menu-popover_delete-content"]', 2000);
+      if (!retryItem) return 'transient_fail';
+      retryItem.click();
+    } else {
+      deleteItem.click();
+    }
+
+    const confirmBtn = await withRetry(
+      () => waitFor('[data-e2e="video-modal-delete"]', 3000),
+      2,
+      'تأكيد الحذف'
+    );
+    if (!confirmBtn) return 'transient_fail';
+
+    confirmBtn.click();
+    console.log('✅ اتحذف فيديو');
+
+    // تأكيد إن التريجر القديم اختفى (يعني الصفحة فعلاً اتنقلت) قبل ما نكمل
+    await delay(1200);
+    await waitFor('[data-e2e="cinema-more-menu-trigger"]', 4000);
+    await delay(800 + Math.random() * 700); // تأخير عشوائي بسيط بين كل فيديو والتاني
+
+    return 'success';
+  }
+
+  async function run() {
+    let count = 0;
+    let consecutiveFails = 0;
+    const maxConsecutiveFails = 4; // لو فشل 4 مرات ورا بعض، يبقى في مشكلة حقيقية
+
+    while (!stopped) {
+      const result = await deleteOneVideo();
+
+      if (result === 'success') {
+        count++;
+        consecutiveFails = 0;
+        console.log(`📊 عدد الفيديوهات المحذوفة لحد دلوقتي: ${count}`);
+      } else if (result === 'no_video') {
+        console.log('🏁 مفيش فيديوهات تانية — خلصنا.');
+        break;
+      } else {
+        consecutiveFails++;
+        console.log(`⚠️ فشل مؤقت (${consecutiveFails}/${maxConsecutiveFails})`);
+        if (consecutiveFails >= maxConsecutiveFails) {
+          console.log('🛑 فشل متكرر — وقف عشان مش هيبقى آمن يكمل.');
+          break;
+        }
+        await delay(2000); // استنى شوية وحاول تاني
+      }
+    }
+
+    console.log(`✅ انتهى. إجمالي المحذوف: ${count}`);
+  }
+
+  run();
+})();
